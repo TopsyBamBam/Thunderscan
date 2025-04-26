@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Thunderscan Report</title>
+</head>
+<body>
+    <h1>Scan Report for {{ target }}</h1>
+    <p>Generated on: {{ date }}</p>
+
+    <h2>Discovered Pages</h2>
+    <ul>
+        {% for link in endpoints.links %}
+        <li>{{ link }}</li>
+        {% endfor %}
+    </ul>
+
+    <h2>SQL Injection Vulnerabilities</h2>
+    {% if sql_vulns %}
+    <ul>
+        {% for vuln in sql_vulns %}
+        <li>{{ vuln }}</li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>No SQLi vulnerabilities found.</p>
+    {% endif %}
+
+    <h2>Hidden Directories</h2>
+    {% if hidden_dirs %}
+    <ul>
+        {% for dir in hidden_dirs %}
+        <li>{{ dir }}</li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>No hidden directories found.</p>
+    {% endif %}
+</body>
+</html>
