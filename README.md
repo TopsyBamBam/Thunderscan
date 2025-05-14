@@ -7,11 +7,11 @@
 - 🌐 Intelligent Web Crawling/Spidering
 - 🛡️ SQL Injection Detection
 - 🔍 Directory/File Bruteforcing
-- 📄 HTML/PDF Report Generation
+- 📄 Report Generation
 - ⚡ Multi-threaded Scanning
 
 ## Installation
 ```bash
-git clone https://github.com/YOUR_USERNAME/Thunderscan.git
+git clone https://github.com/TopsyBamBam/Thunderscan.git
 cd Thunderscan
 pip install -r requirements.txt
