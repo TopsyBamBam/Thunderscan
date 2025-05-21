@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "generated_at": "2025-05-19T11:47:48.978521",
+    "scan_duration": 1909.97,
+    "target": "http://topsyshieldsolutions.ng"
+  },
+  "findings": {
+    "crawled_pages": 0,
+    "hidden_resources": [],
+    "sql_injections": []
+  }
+}

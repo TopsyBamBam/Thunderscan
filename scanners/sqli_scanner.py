@@ -1,4 +1,4 @@
-from urllib.parse import urlparse, parse_qs, urljoin  # LINE 1 - MUST BE FIRST
+from urllib.parse import urlparse, parse_qs, urljoin
 import requests
 import time
 import random
@@ -8,6 +8,7 @@ from tqdm import tqdm
 from bs4 import BeautifulSoup
 import os
 import re
+import difflib
 
 class SQLiScanner:
     def __init__(self, base_url, forms=None, max_workers=10, payload_file="wordlists/sql_payloads.txt", time_threshold=10):
@@ -19,11 +20,12 @@ class SQLiScanner:
         self.vulnerabilities = []
         self.payloads = self._load_payloads(payload_file)
         self.lock = threading.Lock()
+        self.true_responses = {}
+        
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; rv:102.0) Gecko/20100101 Firefox/102.0',
             'X-Forwarded-For': f'127.0.0.{random.randint(1,255)}'
         })
-        self.control_response = None
 
     def _load_payloads(self, filename):
         if not os.path.exists(filename):
@@ -33,16 +35,13 @@ class SQLiScanner:
 
     def scan(self):
         print("[⚡] Starting SQLi vulnerability assessment...")
-        self.control_response = self.session.get(self.base_url)
-        
-        # CORRECT USAGE OF urlparse
-        parsed_url = urlparse(self.base_url)  # <-- Using imported function
+        parsed_url = urlparse(self.base_url)
         params = parse_qs(parsed_url.query)
         
         self._test_parameters(params)
         self._test_forms()
-        
         return self.vulnerabilities
+
     def _test_parameters(self, params):
         if not params:
             return
@@ -74,33 +73,39 @@ class SQLiScanner:
 
     def _test_param(self, param, original_value, payload, pbar):
         try:
-            # Use imported urlparse directly
             parsed = urlparse(self.base_url)
-            query = parse_qs(parsed.query)
-            query[param] = [original_value + payload]
-            test_url = parsed._replace(query="&".join([f"{k}={v[0]}" for k, v in query.items()])).geturl()
+            test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            
+            params = parse_qs(parsed.query)
+            params[param] = [original_value + payload]
+            
+            test_url = requests.Request('GET', test_url, params=params).prepare().url
             
             time.sleep(random.uniform(0.5, 1.5))
             
+            if param not in self.true_responses:
+                self.true_responses[param] = self.session.get(
+                    f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{param}={original_value}"
+                ).text
+            
             start_time = time.time()
-            response = self.session.get(test_url, timeout=15)
+            response = self.session.get(test_url, timeout=self.time_threshold*2)
             elapsed = time.time() - start_time
             
             detection_methods = []
+            if any(cmd in payload.lower() for cmd in ['sleep', 'waitfor']) and elapsed >= self.time_threshold:
+                detection_methods.append(f"Time-based ({elapsed:.2f}s)")
             
-            # Time-based detection
-            if any(cmd in payload.lower() for cmd in ['sleep', 'waitfor']):
-                if elapsed >= self.time_threshold:
-                    detection_methods.append(f"Time-based ({elapsed:.2f}s)")
+            similarity = self._calculate_similarity(
+                self.true_responses[param],
+                response.text
+            )
+            if similarity < 0.7:
+                detection_methods.append(f"Boolean (Similarity: {similarity:.2f})")
             
-            # Error-based detection
-            error_messages = self._detect_errors(response.text)
-            if error_messages:
-                detection_methods.append(f"Error: {error_messages[0]}")
-            
-            # Content-based detection
-            if self._detect_content_changes(response.text):
-                detection_methods.append("Content manipulation")
+            errors = self._detect_errors(response.text)
+            if errors:
+                detection_methods.append(f"Error: {errors[0]}")
             
             if detection_methods:
                 return {
@@ -206,10 +211,13 @@ class SQLiScanner:
         return detected
 
     def _detect_content_changes(self, response_text):
-        original_soup = BeautifulSoup(self.control_response.text, 'html.parser')
+        original_soup = BeautifulSoup(self.true_responses.get('control', ''), 'html.parser')
         test_soup = BeautifulSoup(response_text, 'html.parser')
         return (
             len(original_soup.find_all('form')) != len(test_soup.find_all('form')) or
             bool(test_soup.find(text=re.compile(r"error|exception", re.I))) or
             "SQL" in response_text.upper()
         )
+
+    def _calculate_similarity(self, str1, str2):
+        return difflib.SequenceMatcher(None, str1, str2).ratio()

@@ -10,6 +10,7 @@ from requests_cache import CachedSession
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 from tqdm import tqdm
+from collections import OrderedDict
 
 class Spider:
     def __init__(self, base_url, max_depth=3, max_workers=8, request_delay=0.5):
@@ -19,9 +20,12 @@ class Spider:
         self.running = True
         self.start_time = time()
         self.last_activity = time()
+        self.base_domain = urlparse(self.base_url).netloc
         
         self.lock = threading.Lock()
         self.visited = BloomFilter(max_elements=100000, error_rate=0.01)
+        self.url_cache = OrderedDict()
+        self.cache_size = 1000
         
         self.session = self._create_session()
         self._configure_adapters()
@@ -30,9 +34,9 @@ class Spider:
         self.futures = set()
         self.progress = tqdm(total=1, desc="Crawling Progress", unit="page",
                             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
+        self.results = []
 
     def _create_session(self):
-        """Create isolated cached session for spider only"""
         return CachedSession(
             'thunderscan_cache',
             expire_after=3600,
@@ -41,7 +45,6 @@ class Spider:
         )
 
     def _configure_adapters(self):
-        """Configure retry and connection pooling"""
         retry_strategy = Retry(
             total=3,
             backoff_factor=0.5,
@@ -59,6 +62,16 @@ class Spider:
             'Accept-Language': 'en-US,en;q=0.5'
         })
 
+    def _normalize_url(self, url):
+        parsed = urlparse(url)
+        path = parsed.path.rstrip('/') if parsed.path else '/'
+        return parsed._replace(
+            fragment="",
+            query="",
+            path=path,
+            params=""
+        ).geturl()
+
     def crawl(self):
         try:
             self._submit_task(self.base_url, 0)
@@ -69,9 +82,11 @@ class Spider:
                     for future in as_completed(self.futures, timeout=5):
                         done.append(future)
                         result = future.result()
-                        self._handle_result(result)
-                        self.last_activity = time()
-                        self.progress.update(1)
+                        if result:
+                            self.results.append(result)
+                            self._handle_result(result)
+                            self.last_activity = time()
+                            self.progress.update(1)
                         
                 except TimeoutError:
                     if time() - self.last_activity > 30:
@@ -89,10 +104,11 @@ class Spider:
             print("\n[!] Crawling interrupted by user")
         finally:
             self._safe_shutdown()
-            return self._get_results()
+            return self.results
 
     def _submit_task(self, url, depth):
-        if depth <= self.max_depth and self._should_visit(url):
+        normalized = self._normalize_url(url)
+        if depth <= self.max_depth and self._should_visit(normalized):
             future = self.executor.submit(self._crawl_worker, url, depth)
             self.futures.add(future)
             with self.lock:
@@ -101,9 +117,14 @@ class Spider:
 
     def _should_visit(self, url):
         with self.lock:
-            if url in self.visited:
+            if url in self.visited or url in self.url_cache:
                 return False
+            
+            if len(self.url_cache) >= self.cache_size:
+                self.url_cache.popitem(last=False)
+            
             self.visited.add(url)
+            self.url_cache[url] = True
             return True
 
     def _crawl_worker(self, url, depth):
@@ -112,21 +133,16 @@ class Spider:
             
         try:
             sleep(self.request_delay)
+            normalized = self._normalize_url(url)
             
-            if not self._is_valid_url(url):
+            if not self._is_valid_url(normalized):
                 return {'url': url, 'error': 'Invalid URL format'}
             
             try:
-                response = self.session.get(url, timeout=10)
+                response = self.session.get(normalized, timeout=10)
             except requests.exceptions.RequestException as e:
                 return {'url': url, 'error': f'Request failed: {str(e)}'}
 
-            if response.status_code == 404:
-                return {
-                    'url': url,
-                    'error': '404 Not Found',
-                    'is_html': 'text/html' in response.headers.get('Content-Type', '')
-                }
             if response.status_code >= 400:
                 return {'url': url, 'error': f'{response.status_code} Error'}
 
@@ -141,7 +157,7 @@ class Spider:
                     self._submit_task(link, depth + 1)
             
             return {
-                'url': url,
+                'url': normalized,
                 'links': links,
                 'forms': self._find_forms(soup),
                 'status': response.status_code
@@ -152,15 +168,23 @@ class Spider:
 
     def _extract_links(self, base_url, soup):
         links = []
-        for tag in soup.find_all(['a', 'link'], href=True):
-            absolute_url = urljoin(base_url, tag['href'])
-            if self._is_valid_link(absolute_url):
-                links.append(absolute_url)
+        parsed_base = urlparse(base_url)
+        
+        for tag in soup.find_all(['a', 'link', 'form'], href=True):
+            raw_url = tag.get('href') or tag.get('action', '')
+            absolute_url = urljoin(base_url, raw_url)
+            normalized = self._normalize_url(absolute_url)
+            
+            if self._is_valid_link(normalized):
+                links.append(normalized)
         
         for script in soup.find_all('script'):
             if script.string:
                 matches = re.findall(r"[\'\"](https?:\/\/[^\"\']+)[\'\"]", script.string)
-                links.extend(m for m in matches if self._is_valid_link(m))
+                for m in matches:
+                    normalized = self._normalize_url(urljoin(base_url, m))
+                    if self._is_valid_link(normalized):
+                        links.append(normalized)
         
         return list(set(links))
 
@@ -193,51 +217,22 @@ class Spider:
             return False
 
     def _is_valid_link(self, url):
-        if not self._is_valid_url(url):
-            return False
-            
-        static_extensions = {
-            '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.woff2',
-            '.ttf', '.ico', '.css', '.js', '.json', '.xml', '.pdf', '.webp'
-        }
-        
-        static_paths = {
-            '/static/', '/assets/', '/images/', '/img/', '/fonts/',
-            '/css/', '/js/', '/build/', '/dist/', '_next/static'
-        }
-
         parsed = urlparse(url)
-        base_parsed = urlparse(self.base_url)
-        path = parsed.path.lower()
+        static_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.woff2', '.ttf', '.ico', '.css', '.js'}
+        excluded_paths = {'/static/', '/assets/', '/images/', '/img/', '/fonts/', '/css/', '/js/'}
         
         return (
-            parsed.netloc == base_parsed.netloc and
-            not any(path.endswith(ext) for ext in static_extensions) and
-            not any(seg in path for seg in static_paths) and
-            'wp-json' not in parsed.path and
-            'logout' not in parsed.path.lower()
+            parsed.netloc == self.base_domain and
+            not any(parsed.path.lower().endswith(ext) for ext in static_extensions) and
+            not any(seg in parsed.path.lower() for seg in excluded_paths)
         )
 
     def _handle_result(self, result):
-        if result:
-            if 'error' in result:
-                if '404' in result['error']:
-                    msg = f"[⚠] Broken link ({result['url']}): {result['error']}"
-                    if result.get('is_html'):
-                        msg += " (HTML page)"
-                    tqdm.write(msg)
-                else:
-                    tqdm.write(f"[!] Error ({result['url']}): {result['error']}")
-            elif 'skipped' in result:
-                pass
-            else:
-                tqdm.write(f"[+] Crawled {result['url']} ({len(result['links'])} links)")
+        if result and 'error' in result:
+            tqdm.write(f"[!] Error ({result['url']}): {result['error']}")
 
     def _safe_shutdown(self):
         self.running = False
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.session.close()
         self.progress.close()
-
-    def _get_results(self):
-        return [f.result() for f in self.futures if f.done()]
